@@ -15,7 +15,7 @@ def read_file(filename: str) -> str:
 
 setup(
     name="claude-sieve",
-    version="1.0.0",
+    version="2.0.0",
     description="AST-aware test output compressor for LLM agents — "
                 "mitigates token inflation and context-window degradation.",
     long_description=read_file("README.md"),
@@ -33,10 +33,14 @@ setup(
             "mypy>=1.0",
             "ruff>=0.1",
         ],
+        "treesitter": [
+            "tree-sitter>=0.22",
+        ],
     },
     entry_points={
         "console_scripts": [
             "clavesieve=claude_sieve.main:main",
+            "claude-sieve=claude_sieve.main:main",
         ],
     },
     classifiers=[

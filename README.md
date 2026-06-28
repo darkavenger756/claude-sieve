@@ -6,7 +6,9 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](#)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](#)
 [![Dependencies: 0](https://img.shields.io/badge/dependencies-0-brightgreen)](#)
+[![MCP](https://img.shields.io/badge/MCP-ready-6366f1)](#)
 [![Reduction: 85-91%](https://img.shields.io/badge/token_reduction-85%E2%80%9391%25-orange)](#)
+[![Version](https://img.shields.io/badge/version-2.0.0-blue)](#)
 
 ---
 
@@ -127,6 +129,12 @@ clavesieve --framework jest -- jest --verbose
 
 # JSON output for programmatic consumption
 clavesieve --output json -- pytest tests/
+
+# Smart truncation (cap output at 10KB, keep head+tail)
+clavesieve --max-output 10240 -- pytest tests/
+
+# MCP server mode (for Claude Code, Cursor, etc.)
+clavesieve mcp
 ```
 
 ---
@@ -136,8 +144,9 @@ clavesieve --output json -- pytest tests/
 ```
 usage: clavesieve [-h] [--diff SOURCE] [--output {markdown,json,compact}]
                   [--framework {auto,pytest,jest,mocha,go,unittest}]
-                  [--verbose] [--version]
-                  ...
+                  [--max-output BYTES] [--config PATH]
+                  [--color] [--no-color] [--verbose] [--version]
+                  [command ...]
 
 positional arguments:
   command               Command to execute and filter.
@@ -151,9 +160,103 @@ optional arguments:
                         Output format for the diagnostic report.
   --framework {auto,pytest,jest,mocha,go,unittest}, -f {auto,pytest,jest,mocha,go,unittest}
                         Force a test framework (default: auto-detect).
+  --max-output BYTES, -m BYTES
+                        Cap compressed output at N bytes (head+tail).
+  --config PATH, -c PATH
+                        Path to JSON config file (auto-discovered).
+  --color               Force ANSI color output.
+  --no-color            Disable ANSI color output.
   --verbose, -v         Emit diagnostic information to stderr.
   --version, -V         Show version and exit.
+
+Subcommands:
+  mcp                   Start MCP server for LLM agent integration.
 ```
+
+### MCP Server Mode
+
+Start the MCP server for integration with Claude Code, Cursor, Windsurf, or
+any MCP-compatible agent:
+
+```bash
+clavesieve mcp
+```
+
+The server implements the **Model Context Protocol** over stdio and exposes
+these tools:
+
+| Tool | Description |
+|---|---|
+| `compress` | Compress raw test output text, returning compressed text + stats |
+| `framework_detect` | Auto-detect the test framework from an output sample |
+| `diff_impact` | Analyse a git diff and return modified symbols |
+| `stats` | Return cumulative compression statistics |
+
+**Claude Code configuration** (`.claude.json`):
+```json
+{
+  "mcpServers": {
+    "claude-sieve": {
+      "command": "clavesieve",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+**Cursor configuration** (`.cursor/mcp.json`):
+```json
+{
+  "mcpServers": {
+    "claude-sieve": {
+      "command": "clavesieve",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+### Configuration File
+
+Claude-Sieve auto-discovers a JSON config file in these locations
+(higher priority first):
+
+1. `./claude-sieve.json` or `./.claude-sieve.json`
+2. Any parent directory (walked upward)
+3. `~/.config/claude-sieve/config.json`
+4. `~/.claude-sieve.json`
+
+Example `claude-sieve.json`:
+
+```json
+{
+  "default_output": "compact",
+  "verbose": true,
+  "max_output_bytes": 50000,
+  "truncate_strategy": "head-tail",
+  "framework": "auto",
+  "exclude_loggers": ["botocore", "urllib3"],
+  "custom_patterns": {
+    "keep": ["^CUSTOM\\s+ERROR"],
+    "drop": ["/my-internal-lib/"]
+  }
+}
+```
+
+All values are optional — CLI flags override matching config fields.
+
+### Smart Truncation
+
+Use `--max-output N` (or `-m N`) to cap the compressed output at approximately
+*N* bytes.  Three truncation strategies are available:
+
+| Strategy | Behavior | Config value |
+|---|---|---|
+| `head-tail` (default) | Keep first 20% + last 20%, replace middle with a truncation notice | `head-tail` |
+| `head` | Keep only the first N bytes | `head` |
+| `tail` | Keep only the last N bytes | `tail` |
+
+Strategy is controlled via the config file's `truncate_strategy` field.
 
 ### Exit Codes
 

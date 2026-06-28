@@ -7,6 +7,7 @@ file paths, line numbers, and any lines that reference recently modified
 code symbols.
 """
 
+import os
 import re
 import threading
 from typing import Iterator, Optional
@@ -37,12 +38,18 @@ _PYTEST: dict[str, list[re.Pattern[str]]] = {
         re.compile(r'^\d+ passed'),
         re.compile(r'^\d+ failed'),
         re.compile(r'^tests collected'),
+        re.compile(r'^\d+ warnings?'),
         re.compile(r'^=+ .+ =+$'),
+        re.compile(r'^\-+ .+ \-+$'),
         re.compile(r'^-.+Captured stdout'),
         re.compile(r'^-.+Captured stderr'),
         re.compile(r'^-.+Captured log'),
         re.compile(r'^>'),
         re.compile(r'^\s+[-+].*\S'),
+        re.compile(r'^\s+~+\s*$'),
+        re.compile(r'^(PASSED|FAILED|ERROR)\s'),
+        re.compile(r'^\.+$'),
+        re.compile(r'^s+$'),
     ],
     'drop': [
         re.compile(r'/site-packages/'),
@@ -51,6 +58,12 @@ _PYTEST: dict[str, list[re.Pattern[str]]] = {
         re.compile(r'_pytest/'),
         re.compile(r'pluggy/'),
         re.compile(r'py\.py'),
+        re.compile(r'/conftest\.py'),
+        re.compile(r'/virtualenv/'),
+        re.compile(r'/venv/'),
+        re.compile(r'/\.tox/'),
+        re.compile(r'/\.direnv/'),
+        re.compile(r'lib64/python3\.\d+/'),
     ],
 }
 
@@ -65,6 +78,9 @@ _JEST: dict[str, list[re.Pattern[str]]] = {
         re.compile(r'^\s+Expected:'),
         re.compile(r'^\s+Difference:'),
         re.compile(r'^\s+>\s+\d+'),
+        re.compile(r'^\s+\d+\|'),
+        re.compile(r'^\s+\^+'),
+        re.compile(r'^\s{10,}\S'),
     ],
     'drop': [
         re.compile(r'/node_modules/'),
@@ -77,10 +93,17 @@ _JEST: dict[str, list[re.Pattern[str]]] = {
         re.compile(r'jest-matcher-utils'),
         re.compile(r'jest-message-util'),
         re.compile(r'jest-util'),
+        re.compile(r'jest-worker'),
+        re.compile(r'jest-cli'),
+        re.compile(r'jest-haste-map'),
+        re.compile(r'jest-resolve'),
+        re.compile(r'jest-regex-util'),
+        re.compile(r'jest-snapshot'),
         re.compile(r'^\s+at\s+processTicksAndRejections'),
         re.compile(r'^\s+at\s+async\s+'),
         re.compile(r'^\s+at\s+new Promise'),
         re.compile(r'^\s+at\s+<anonymous>'),
+        re.compile(r'^\s+at\s+Object\.<anonymous>'),
     ],
 }
 
@@ -93,11 +116,14 @@ _MOCHA: dict[str, list[re.Pattern[str]]] = {
         re.compile(r'^\s+assert\b'),
         re.compile(r'^\s+expected\b'),
         re.compile(r'^\s+actual\b'),
+        re.compile(r'^\s+-\s+'),
+        re.compile(r'^\s\+\s+'),
         re.compile(r'^  \S'),
     ],
     'drop': [
         re.compile(r'/node_modules/'),
         re.compile(r'mocha/lib/'),
+        re.compile(r'mocha/node_modules/'),
         re.compile(r'\(node:internal/'),
         re.compile(r'^\s+at\s+processTicksAndRejections'),
         re.compile(r'^\s+at\s+new Promise'),
@@ -115,10 +141,31 @@ _GO: dict[str, list[re.Pattern[str]]] = {
         re.compile(r'^\s+Error Trace'),
         re.compile(r'^\tError'),
         re.compile(r'^\tMessage'),
+        re.compile(r'^\tExpected'),
+        re.compile(r'^\tActual'),
     ],
     'drop': [
         re.compile(r'/usr/local/go/src/'),
         re.compile(r'\(0x[0-9a-f]+\)'),
+        re.compile(r'/go/pkg/mod/'),
+        re.compile(r'\.\.\.'),
+    ],
+}
+
+_UNITTEST: dict[str, list[re.Pattern[str]]] = {
+    'keep': [
+        re.compile(r'^(OK|FAILED)\s*$'),
+        re.compile(r'^Ran \d+ test'),
+        re.compile(r'^Traceback'),
+        re.compile(r'^\s+File\s+\".+\.py\"'),
+        re.compile(r'^AssertionError'),
+        re.compile(r'^\w+Error:'),
+        re.compile(r'^\s+assert\b'),
+    ],
+    'drop': [
+        re.compile(r'/site-packages/'),
+        re.compile(r'(?:lib|site-packages)/python3\.\d+/'),
+        re.compile(r'/unittest/'),
     ],
 }
 
@@ -127,6 +174,8 @@ _FRAMEWORK_TABLES: dict[str, dict[str, list[re.Pattern[str]]]] = {
     'jest': _JEST,
     'mocha': _MOCHA,
     'go': _GO,
+    'unittest': _UNITTEST,
+    'auto': _PYTEST,  # fallback
 }
 
 
@@ -137,11 +186,14 @@ _FRAMEWORK_TABLES: dict[str, dict[str, list[re.Pattern[str]]]] = {
 _FRAMEWORK_PROBES: list[tuple[str, list[re.Pattern[str]]]] = [
     ('pytest', [re.compile(r'^={3,}\s+test session starts\s+={3,}')]),
     ('pytest', [re.compile(r'FAILURES')]),
+    ('pytest', [re.compile(r'^={3,}\s+FAILURES\s+={3,}')]),
     ('jest', [re.compile(r'^(PASS|FAIL)\s')]),
     ('jest', [re.compile(r'^Test Suites:')]),
     ('mocha', [re.compile(r'passing'), re.compile(r'failing')]),
     ('go', [re.compile(r'^=== RUN\s')]),
     ('go', [re.compile(r'^--- FAIL:')]),
+    ('unittest', [re.compile(r'^Ran \d+ test')]),
+    ('unittest', [re.compile(r'^FAILED \(')]),
 ]
 
 
@@ -324,6 +376,20 @@ class LogSieve:
                 self._stats['bytes_in'] += len(raw)
                 self._stats['lines_in'] += 1
 
+    def extend_patterns(
+        self,
+        fw: str,
+        keep: list[str] | None = None,
+        drop: list[str] | None = None,
+    ) -> None:
+        """Extend the keep/drop patterns for a given framework with
+        custom regex strings (loaded from config file)."""
+        table = _FRAMEWORK_TABLES.get(fw, _PYTEST)
+        if keep:
+            table['keep'].extend(re.compile(p) for p in keep)
+        if drop:
+            table['drop'].extend(re.compile(p) for p in drop)
+
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
@@ -352,6 +418,12 @@ class LogSieve:
         if not self._context_nodes:
             return False
         for node in self._context_nodes:
-            if node.get('file_path', '') in line:
+            fp = node.get('file_path', '')
+            if not fp:
+                continue
+            if fp in line:
+                return True
+            tail = os.path.basename(fp)
+            if tail and tail in line:
                 return True
         return False

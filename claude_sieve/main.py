@@ -6,6 +6,7 @@ Usage::
     clavesieve --diff HEAD~1 -- pytest tests/
     git diff HEAD~1 | clavesieve --diff - -- npm test
     clavesieve --output json -- jest --verbose
+    clavesieve mcp                          # MCP server mode
 """
 
 import argparse
@@ -18,6 +19,21 @@ from typing import Sequence
 from . import __version__
 from .ast_parser import ASTAnalyzer
 from .compressors import LogSieve
+from .config import load_config, merge_cli_overrides
+
+
+_COLOR_RED = '\033[31m'
+_COLOR_GREEN = '\033[32m'
+_COLOR_YELLOW = '\033[33m'
+_COLOR_CYAN = '\033[36m'
+_COLOR_BOLD = '\033[1m'
+_COLOR_RESET = '\033[0m'
+
+
+def _color(text: str, code: str, use_color: bool) -> str:
+    if use_color:
+        return f'{code}{text}{_COLOR_RESET}'
+    return text
 
 
 # ======================================================================
@@ -26,17 +42,11 @@ from .compressors import LogSieve
 
 
 def _resolve_diff_source(diff_arg: str) -> str:
-    """Return the raw text of a git diff from *diff_arg*.
-
-    Accepts ``'-'`` (stdin), a path to an existing file, or a git
-    revision range (e.g. ``'HEAD~1'``, ``'main..feature'``).
-    """
     if diff_arg == '-':
         return sys.stdin.read()
     if os.path.isfile(diff_arg):
         with open(diff_arg, encoding='utf-8', errors='replace') as f:
             return f.read()
-    # Treat as git revision range
     try:
         result = subprocess.run(
             ['git', 'diff', diff_arg],
@@ -59,13 +69,44 @@ def _resolve_diff_source(diff_arg: str) -> str:
     return result.stdout
 
 
+def _truncate_output(text: str, max_bytes: int, strategy: str = 'head-tail') -> str:
+    """Truncate *text* to at most *max_bytes* using the given *strategy*.
+
+    Strategies:
+      ``head-tail`` — keep the first 20% and last 20%.
+      ``head``      — keep only the first *max_bytes*.
+      ``tail``      — keep only the last *max_bytes*.
+    """
+    if max_bytes <= 0:
+        return text
+    encoded = text.encode('utf-8')
+    if len(encoded) <= max_bytes:
+        return text
+
+    if strategy == 'head':
+        return encoded[:max_bytes].decode('utf-8', errors='replace')
+
+    if strategy == 'tail':
+        return encoded[-max_bytes:].decode('utf-8', errors='replace')
+
+    head_pct = 0.2
+    tail_pct = 0.2
+    head_n = int(max_bytes * head_pct)
+    tail_n = int(max_bytes * tail_pct)
+
+    head = encoded[:head_n]
+    tail = encoded[-tail_n:]
+    dropped = len(encoded) - head_n - tail_n
+    middle = f'\n[... truncated {dropped:,} bytes ...]\n'.encode('utf-8')
+    return (head + middle + tail).decode('utf-8', errors='replace')
+
+
 def _build_report(
     compressed: str,
     stats: dict[str, int | str | None],
     output_format: str,
+    use_color: bool = False,
 ) -> str:
-    """Format the sieve output and metrics into one of the supported
-    report formats."""
     bytes_in = stats.get('bytes_in', 0)
     bytes_out = stats.get('bytes_out', 0)
     assert isinstance(bytes_in, int) and isinstance(bytes_out, int)
@@ -98,17 +139,23 @@ def _build_report(
         stripped = compressed.rstrip()
         if stripped:
             parts.append(stripped)
-        parts.append(
+        metric = (
             f'[Claude-Sieve] {bytes_in:,}B \u2192 {bytes_out:,}B '
             f'({reduction:.1f}% reduction)'
         )
+        if use_color:
+            metric = _color(metric, _COLOR_CYAN, True)
+        parts.append(metric)
         return '\n'.join(parts)
 
-    # Markdown (default)
     lines_in = stats.get('lines_in', 0)
     lines_out = stats.get('lines_out', 0)
+    reduction_str = f'{reduction:.1f}%'
+    if use_color:
+        reduction_str = _color(reduction_str, _COLOR_GREEN if reduction > 50 else _COLOR_YELLOW, True)
+
     report = [
-        '## Claude-Sieve Diagnostic Report',
+        _color('## Claude-Sieve Diagnostic Report', _COLOR_BOLD, use_color),
         '',
         '| Metric | Value |',
         '|---|---|',
@@ -117,7 +164,7 @@ def _build_report(
         f'| Bytes Emitted | {bytes_out:,} |',
         f'| Lines Processed | {lines_in:,} |',
         f'| Lines Emitted | {lines_out:,} |',
-        f'| Reduction | {reduction:.1f}% |',
+        f'| Reduction | {reduction_str} |',
         '',
     ]
     if compressed.strip():
@@ -141,6 +188,7 @@ def _build_cli_parser() -> argparse.ArgumentParser:
             '  clavesieve --diff HEAD~1 -- pytest tests/\n'
             '  git diff HEAD~1 | clavesieve --diff - -- npm test\n'
             '  clavesieve --output json -- jest --verbose\n'
+            '  clavesieve mcp                        # MCP server mode\n'
         ),
     )
     parser.add_argument(
@@ -157,16 +205,43 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         '--output', '-o',
         type=str,
-        default='markdown',
+        default=None,
         choices=['markdown', 'json', 'compact'],
         help='Output format for the diagnostic report (default: markdown).',
     )
     parser.add_argument(
         '--framework', '-f',
         type=str,
-        default='auto',
+        default=None,
         choices=['auto', 'pytest', 'jest', 'mocha', 'go', 'unittest'],
         help='Force a test framework (default: auto-detect).',
+    )
+    parser.add_argument(
+        '--max-output', '-m',
+        type=int,
+        default=None,
+        metavar='BYTES',
+        help='Maximum output bytes (truncates to head+tail if exceeded).',
+    )
+    parser.add_argument(
+        '--config', '-c',
+        type=str,
+        default=None,
+        metavar='PATH',
+        help='Path to a JSON config file (auto-discovered if omitted).',
+    )
+    parser.add_argument(
+        '--color',
+        action='store_true',
+        default=None,
+        help='Force ANSI color output.',
+    )
+    parser.add_argument(
+        '--no-color',
+        action='store_true',
+        default=None,
+        dest='no_color',
+        help='Disable ANSI color output.',
     )
     parser.add_argument(
         '--verbose', '-v',
@@ -192,7 +267,6 @@ def _build_cli_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """CLI entry point.  Returns the exit code of the child process."""
     parser = _build_cli_parser()
     args = parser.parse_args(argv)
 
@@ -200,15 +274,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f'claude-sieve v{__version__}')
         return 0
 
+    # ---- 0. special subcommand: mcp server ---------------------------
+    if args.command and args.command[0] == 'mcp':
+        from .mcp_server import run_server
+        return run_server()
+
     if not args.command:
         parser.print_help()
         return 1
 
-    # argparse.REMAINDER captures a leading '--' separator as the first
-    # element when users write:  clavesieve -- pytest tests/
     command: list[str] = list(args.command)
     if command and command[0] == '--':
         command = command[1:]
+
+    # ---- config file --------------------------------------------------
+    cfg = load_config(args.config)
+    cfg = merge_cli_overrides(cfg, args)
+
+    use_color = args.color if args.color else (not args.no_color if args.no_color else False)
+    output_format: str = cfg.get('default_output', 'markdown') or 'markdown'
+    forced_framework: str | None = cfg.get('framework', 'auto')
+    if forced_framework == 'auto':
+        forced_framework = None
+    max_output: int = cfg.get('max_output_bytes', 0) or 0
 
     # ---- 1. resolve AST context from diff --------------------------------
     context_nodes: list[dict] = []
@@ -217,7 +305,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if diff_stream.strip():
             analyzer = ASTAnalyzer()
             context_nodes = analyzer.bulk_analyze(diff_stream)
-            if args.verbose:
+            if cfg.get('verbose'):
                 print(
                     f'[Claude-Sieve] AST context: {len(context_nodes)} '
                     f'modified symbol(s) detected',
@@ -225,10 +313,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
 
     # ---- 2. build sieve --------------------------------------------------
-    forced_fw: str | None = (
-        None if args.framework == 'auto' else args.framework
-    )
-    sieve = LogSieve(context_nodes=context_nodes, forced_framework=forced_fw)
+    sieve = LogSieve(context_nodes=context_nodes, forced_framework=forced_framework)
 
     # ---- 3. launch subprocess --------------------------------------------
     try:
@@ -264,7 +349,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             sys.stdout.flush()
             output_lines.append(line)
     except BrokenPipeError:
-        # stdout closed (e.g. piped to head)
         pass
 
     returncode = process.wait()
@@ -276,10 +360,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             if full_output:
                 compressed = sieve.sieve(full_output)
+                if max_output > 0:
+                    compressed = _truncate_output(compressed, max_output)
             else:
                 compressed = ''
             stats = sieve.stats
-            report = _build_report(compressed, stats, args.output)
+            report = _build_report(compressed, stats, output_format, use_color)
             print()
             print(report)
         except Exception as exc:

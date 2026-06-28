@@ -1,2 +1,0 @@
-[console_scripts]
-clavesieve = claude_sieve.main:main
