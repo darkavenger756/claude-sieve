@@ -217,10 +217,16 @@ class LogSieve:
         self,
         context_nodes: Optional[list[dict]] = None,
         forced_framework: Optional[str] = None,
+        exclude_loggers: Optional[list[str]] = None,
     ) -> None:
         self._lock = threading.Lock()
         self._context_nodes = context_nodes or []
         self._forced_framework = forced_framework
+        self._exclude_logger_patterns: list[re.Pattern[str]] = []
+        for logger_name in (exclude_loggers or []):
+            self._exclude_logger_patterns.append(
+                re.compile(r'\b' + re.escape(logger_name) + r'\b')
+            )
         self._stats: dict[str, int | str | None] = {
             'bytes_in': 0,
             'bytes_out': 0,
@@ -271,8 +277,8 @@ class LogSieve:
 
         with self._lock:
             raw = stream.encode('utf-8')
-            self._stats['bytes_in'] += len(raw)
-            self._stats['lines_in'] += len(lines)
+            self._stats['bytes_in'] = int(self._stats['bytes_in'] or 0) + len(raw)
+            self._stats['lines_in'] = int(self._stats['lines_in'] or 0) + len(lines)
 
         for line in lines:
             stripped = line.rstrip('\n\r')
@@ -295,8 +301,8 @@ class LogSieve:
 
         with self._lock:
             out_bytes = result.encode('utf-8')
-            self._stats['bytes_out'] += len(out_bytes)
-            self._stats['lines_out'] += len(output_lines)
+            self._stats['bytes_out'] = int(self._stats['bytes_out'] or 0) + len(out_bytes)
+            self._stats['lines_out'] = int(self._stats['lines_out'] or 0) + len(output_lines)
 
         return result
 
@@ -327,7 +333,6 @@ class LogSieve:
                 if detected is not None:
                     framework = detected
                     framework_locked = True
-                    # Re-process buffered lines with known framework
                     fw = framework or 'pytest'
                     table = _FRAMEWORK_TABLES.get(fw, _PYTEST)
                     for buf_line in buffer:
@@ -336,12 +341,11 @@ class LogSieve:
                         ):
                             with self._lock:
                                 raw = buf_line.encode('utf-8')
-                                self._stats['bytes_out'] += len(raw)
-                                self._stats['lines_out'] += 1
+                                self._stats['bytes_out'] = int(self._stats['bytes_out'] or 0) + len(raw)
+                                self._stats['lines_out'] = int(self._stats['lines_out'] or 0) + 1
                             yield buf_line
                     buffer.clear()
                 if first_pass and len(buffer) >= 100:
-                    # detect failed — default to pytest
                     framework = 'pytest'
                     framework_locked = True
                     fw = 'pytest'
@@ -352,8 +356,8 @@ class LogSieve:
                         ):
                             with self._lock:
                                 raw = buf_line.encode('utf-8')
-                                self._stats['bytes_out'] += len(raw)
-                                self._stats['lines_out'] += 1
+                                self._stats['bytes_out'] = int(self._stats['bytes_out'] or 0) + len(raw)
+                                self._stats['lines_out'] = int(self._stats['lines_out'] or 0) + 1
                             yield buf_line
                     buffer.clear()
                     with self._lock:
@@ -367,14 +371,14 @@ class LogSieve:
             if self._passes_filter(stripped, table):
                 with self._lock:
                     raw = line.encode('utf-8')
-                    self._stats['bytes_out'] += len(raw)
-                    self._stats['lines_out'] += 1
+                    self._stats['bytes_out'] = int(self._stats['bytes_out'] or 0) + len(raw)
+                    self._stats['lines_out'] = int(self._stats['lines_out'] or 0) + 1
                 yield line
 
             with self._lock:
                 raw = line.encode('utf-8')
-                self._stats['bytes_in'] += len(raw)
-                self._stats['lines_in'] += 1
+                self._stats['bytes_in'] = int(self._stats['bytes_in'] or 0) + len(raw)
+                self._stats['lines_in'] = int(self._stats['lines_in'] or 0) + 1
 
     def extend_patterns(
         self,
@@ -396,9 +400,13 @@ class LogSieve:
 
     def _passes_filter(self, line: str, table: dict[str, list[re.Pattern[str]]]) -> bool:
         """Return ``True`` if *line* should be part of the compressed output."""
-        # Short-circuit: empty lines are never kept
         if not line:
-            return False
+            return True
+
+        if self._exclude_logger_patterns:
+            for pat in self._exclude_logger_patterns:
+                if pat.search(line):
+                    return False
 
         # Drop rules (short-circuit if matched, unless context-retained)
         for pattern in table['drop']:

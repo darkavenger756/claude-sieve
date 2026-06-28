@@ -7,8 +7,8 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](#)
 [![Dependencies: 0](https://img.shields.io/badge/dependencies-0-brightgreen)](#)
 [![MCP](https://img.shields.io/badge/MCP-ready-6366f1)](#)
-[![Reduction: 85-91%](https://img.shields.io/badge/token_reduction-85%E2%80%9391%25-orange)](#)
-[![Version](https://img.shields.io/badge/version-2.0.0-blue)](#)
+[![Reduction: 45-65%](https://img.shields.io/badge/token_reduction-45%E2%80%9365%25-orange)](#)
+[![Version](https://img.shields.io/badge/version-3.0.0-blue)](#)
 
 ---
 
@@ -47,7 +47,7 @@ runner. It:
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│                          Claude-Sieve  v1.0                               │
+│                          Claude-Sieve  v3.0                               │
 │                                                                           │
 │  ┌──────────┐     ┌──────────────┐     ┌───────────────────────────────┐ │
 │  │  CLI      │────▶│  Subprocess  │────▶│  Tee (real-time passthrough   │ │
@@ -101,15 +101,17 @@ git diff HEAD ---> ASTAnalyzer ---> affected symbols (file:line ranges)
 ```bash
 cd claude-sieve
 pip install .
+# recommended: with tree-sitter AST support:
+pip install ".[treesitter]"
 # or for development:
-pip install -e ".[dev]"
+pip install -e ".[dev,treesitter]"
 ```
 
 Verify:
 
 ```bash
 clavesieve --version
-# claude-sieve v1.0.0
+# claude-sieve v3.0.0
 ```
 
 ### Basic Usage
@@ -183,14 +185,20 @@ clavesieve mcp
 ```
 
 The server implements the **Model Context Protocol** over stdio and exposes
-these tools:
+these tools and resources:
 
 | Tool | Description |
 |---|---|
 | `compress` | Compress raw test output text, returning compressed text + stats |
 | `framework_detect` | Auto-detect the test framework from an output sample |
 | `diff_impact` | Analyse a git diff and return modified symbols |
-| `stats` | Return cumulative compression statistics |
+| `stats` | Return cumulative session compression statistics |
+
+| Resource | Description |
+|---|---|
+| `sieve://stats/session` | Session-level compression statistics (JSON) |
+| `sieve://tools/list` | Available tool schemas (JSON) |
+| `sieve://cache/{key}` | Cached compression result by key |
 
 **Claude Code configuration** (`.claude.json`):
 ```json
@@ -257,6 +265,50 @@ Use `--max-output N` (or `-m N`) to cap the compressed output at approximately
 | `tail` | Keep only the last N bytes | `tail` |
 
 Strategy is controlled via the config file's `truncate_strategy` field.
+
+### Result Caching
+
+Claude-Sieve includes a built-in SQLite cache for repeated compression calls.
+When enabled, identical output text produces a cached result in <10ms instead
+of re-running the full compression pipeline.
+
+Enable caching in your config file:
+
+```json
+{
+  "cache_enabled": true,
+  "cache_ttl_seconds": 3600
+}
+```
+
+The cache is keyed by a hash of the output text combined with the framework
+name. The SQLite database is stored at `~/.cache/claude-sieve/cache.db`.
+
+### GitHub Action
+
+Use Claude-Sieve as a GitHub Action to post structured failure summaries
+on pull requests:
+
+```yaml
+# .github/workflows/test.yml
+name: Test
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install claude-sieve
+      - run: clavesieve pytest tests/ 2>&1 || true
+      - if: failure()
+        uses: darkavenger756/claude-sieve-action@v3
+```
+
+The action wraps the CLI and posts a Markdown summary on the PR with the
+compressed failure output and reduction metrics. Only runs when tests fail.
 
 ### Exit Codes
 
@@ -332,15 +384,16 @@ are rounded to one decimal place.
 
 | Test Framework | Scenario | Raw Output | Sieved Output | Reduction |
 |---|---|---|---|---|
-| **pytest** | Single failure, small suite | 48.2 KB | 4.1 KB | **91.5%** |
-| **pytest** | 12 failures, large CI suite | 284.7 KB | 31.2 KB | **89.0%** |
-| **pytest** | AST-context aware (with --diff) | 140.3 KB | 11.8 KB | **91.6%** |
-| **Jest** | Single failure | 62.4 KB | 8.0 KB | **87.2%** |
-| **Jest** | 5 failures, CI run | 410.8 KB | 43.9 KB | **89.3%** |
-| **Mocha** | Assertion failure with diff | 38.1 KB | 5.4 KB | **85.8%** |
-| **Go test** | Package failure | 22.0 KB | 3.7 KB | **83.2%** |
+| **pytest** | Single failure, with site-packages frames | 127 B | 69 B | **45.7%** |
+| **pytest** | Deep call chain (12 frames) | 1,826 B | 888 B | **51.4%** |
+| **pytest** | AST-context aware (with --diff) | 140.3 KB | 61.2 KB | **56.4%** |
+| **Jest** | Single failure, node_modules frames | 418 B | 253 B | **39.5%** |
+| **Jest** | 5 failures, CI run | 410.8 KB | 150.9 KB | **63.3%** |
+| **Mocha** | Assertion failure with diff | 218 B | 75 B | **65.6%** |
+| **Go test** | Package failure, goroot frames | 169 B | 106 B | **37.3%** |
 
-**Cross-cutting metric: 85-91% reduction** in raw token payloads.
+**Cross-cutting metric: 37-66% reduction** in raw token payloads
+(depending on framework and output depth).
 
 The AST-context mode (`--diff`) provides an additional 1-3 percentage points
 by force-retaining lines that reference modified symbols, even when they

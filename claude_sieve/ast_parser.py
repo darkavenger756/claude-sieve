@@ -9,7 +9,6 @@ import ast
 import os
 import re
 from functools import lru_cache
-from typing import Iterator
 
 
 _HUNK_HEADER = re.compile(r'^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@')

@@ -11,7 +11,6 @@ CLI flags override config-file values where both are set.
 """
 
 import json
-import os
 from pathlib import Path
 from typing import Any
 

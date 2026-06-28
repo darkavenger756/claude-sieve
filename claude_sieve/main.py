@@ -189,6 +189,8 @@ def _build_cli_parser() -> argparse.ArgumentParser:
             '  git diff HEAD~1 | clavesieve --diff - -- npm test\n'
             '  clavesieve --output json -- jest --verbose\n'
             '  clavesieve mcp                        # MCP server mode\n'
+            '  clavesieve bench                      # Run benchmarks\n'
+            '  clavesieve bench pytest 5             # 5 iterations on pytest\n'
         ),
     )
     parser.add_argument(
@@ -274,7 +276,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f'claude-sieve v{__version__}')
         return 0
 
-    # ---- 0. special subcommand: mcp server ---------------------------
+    # ---- 0. special subcommands: bench / mcp server -------------------
+    if args.command and args.command[0] == 'bench':
+        from .bench import run_bench, print_bench
+        fw = args.command[1] if len(args.command) > 1 and args.command[1] in ('pytest', 'jest', 'mocha', 'go', 'unittest') else None
+        extra = args.command[2:] if len(args.command) > 2 else []
+        iterations = 3
+        if extra and extra[0].lstrip('-').isdigit():
+            iterations = int(extra[0].lstrip('-'))
+        results = run_bench(framework=fw, iterations=iterations)
+        print_bench(results)
+        return 0
+
     if args.command and args.command[0] == 'mcp':
         from .mcp_server import run_server
         return run_server()
@@ -291,12 +304,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     cfg = load_config(args.config)
     cfg = merge_cli_overrides(cfg, args)
 
-    use_color = args.color if args.color else (not args.no_color if args.no_color else False)
+    use_color = args.color if args.color else (not args.no_color if args.no_color else sys.stdout.isatty())
     output_format: str = cfg.get('default_output', 'markdown') or 'markdown'
     forced_framework: str | None = cfg.get('framework', 'auto')
     if forced_framework == 'auto':
         forced_framework = None
     max_output: int = cfg.get('max_output_bytes', 0) or 0
+    truncate_strategy: str = cfg.get('truncate_strategy', 'head-tail') or 'head-tail'
+    exclude_loggers: list[str] = cfg.get('exclude_loggers', []) or []
 
     # ---- 1. resolve AST context from diff --------------------------------
     context_nodes: list[dict] = []
@@ -313,7 +328,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
 
     # ---- 2. build sieve --------------------------------------------------
-    sieve = LogSieve(context_nodes=context_nodes, forced_framework=forced_framework)
+    sieve = LogSieve(context_nodes=context_nodes, forced_framework=forced_framework, exclude_loggers=exclude_loggers)
 
     # ---- 3. launch subprocess --------------------------------------------
     try:
@@ -359,12 +374,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         full_output = ''.join(output_lines)
         try:
             if full_output:
-                compressed = sieve.sieve(full_output)
+                cache_hit = False
+                cache_enabled = cfg.get('cache_enabled', False)
+                if cache_enabled:
+                    from .cache import SieveCache
+                    _cache = SieveCache(ttl=cfg.get('cache_ttl_seconds', 3600))
+                    cached = _cache.get(full_output, forced_framework or 'auto')
+                    if cached is not None:
+                        compressed, stats = cached
+                        cache_hit = True
+                if not cache_hit:
+                    compressed = sieve.sieve(full_output)
+                    stats = sieve.stats
+                    if cache_enabled:
+                        _cache.set(full_output, forced_framework or 'auto', compressed, dict(stats))
                 if max_output > 0:
-                    compressed = _truncate_output(compressed, max_output)
+                    compressed = _truncate_output(compressed, max_output, strategy=truncate_strategy)
             else:
                 compressed = ''
-            stats = sieve.stats
+                stats = sieve.stats
             report = _build_report(compressed, stats, output_format, use_color)
             print()
             print(report)
@@ -400,7 +428,7 @@ def _install_signal_forwarders(process: subprocess.Popen) -> None:
 
 def _restore_signal_handlers() -> None:
     for sig, handler in _saved_handlers.items():
-        signal.signal(sig, handler)
+        signal.signal(sig, handler)  # type: ignore[arg-type]
     _saved_handlers.clear()
 
 

@@ -1,0 +1,43 @@
+name: 'Claude-Sieve Action'
+description: 'Compress test failure output and post structured summary on PRs'
+author: 'darkavenger756'
+
+branding:
+  icon: 'filter'
+  color: 'purple'
+
+inputs:
+  command:
+    description: 'Test command to run (e.g. "pytest tests/ -x")'
+    required: true
+  framework:
+    description: 'Test framework (auto, pytest, jest, mocha, go, unittest)'
+    required: false
+    default: 'auto'
+  output:
+    description: 'Output format (markdown, json, compact)'
+    required: false
+    default: 'markdown'
+  max-output:
+    description: 'Maximum output bytes (truncates head+tail if exceeded)'
+    required: false
+    default: ''
+
+runs:
+  using: 'composite'
+  steps:
+    - run: |
+        ARGS=""
+        if [ -n "${{ inputs.framework }}" ] && [ "${{ inputs.framework }}" != "auto" ]; then
+          ARGS="$ARGS --framework ${{ inputs.framework }}"
+        fi
+        if [ -n "${{ inputs.output }}" ]; then
+          ARGS="$ARGS --output ${{ inputs.output }}"
+        fi
+        if [ -n "${{ inputs.max-output }}" ]; then
+          ARGS="$ARGS --max-output ${{ inputs.max-output }}"
+        fi
+        pip install claude-sieve 2>/dev/null || pip install claude-sieve --quiet
+        clavesieve $ARGS -- ${{ inputs.command }} 2>&1 || true
+      shell: bash
+      working-directory: ${{ github.workspace }}

@@ -19,6 +19,12 @@ from typing import Any, Callable
 
 from .compressors import LogSieve
 from .ast_parser import ASTAnalyzer
+from . import __version__
+
+
+# Session-level cumulative stats
+_session_stats: dict[str, int] = {'total_compress_calls': 0, 'total_bytes_in': 0, 'total_bytes_out': 0}
+_session_cache: dict[str, str] = {}
 
 
 # ------------------------------------------------------------------
@@ -31,7 +37,8 @@ _TOOLS: list[dict[str, Any]] = [
         'description': (
             'Compress raw test output text, retaining only semantically '
             'relevant error information.  Returns compressed text and '
-            'compression statistics.'
+            'compression statistics.  Use this when you have test failure '
+            'output that needs to fit within a token budget.'
         ),
         'inputSchema': {
             'type': 'object',
@@ -51,12 +58,18 @@ _TOOLS: list[dict[str, Any]] = [
             },
             'required': ['output'],
         },
+        'annotations': {
+            'readOnlyHint': True,
+            'idempotentHint': True,
+        },
     },
     {
         'name': 'framework_detect',
         'description': (
             'Auto-detect the test framework used to produce a given '
-            'output fragment.  Returns the framework name and confidence.'
+            'output fragment.  Returns the framework name and confidence. '
+            'Call this on the first 20 lines of test output to determine '
+            'which framework flag to pass to compress.'
         ),
         'inputSchema': {
             'type': 'object',
@@ -68,13 +81,18 @@ _TOOLS: list[dict[str, Any]] = [
             },
             'required': ['output'],
         },
+        'annotations': {
+            'readOnlyHint': True,
+            'idempotentHint': True,
+        },
     },
     {
         'name': 'diff_impact',
         'description': (
             'Analyse a git diff and return the set of modified Python '
             'symbols (classes, functions, methods) that could affect '
-            'test output relevance.'
+            'test output relevance.  Pass the result as context_nodes '
+            'to compress for AST-aware filtering.'
         ),
         'inputSchema': {
             'type': 'object',
@@ -92,17 +110,41 @@ _TOOLS: list[dict[str, Any]] = [
             },
             'required': ['diff'],
         },
+        'annotations': {
+            'readOnlyHint': True,
+            'idempotentHint': True,
+        },
     },
     {
         'name': 'stats',
         'description': (
             'Return cumulative compression statistics for the current '
-            'session.'
+            'MCP session.  Includes total calls, bytes in/out across all '
+            'compress invocations since the server started.'
         ),
         'inputSchema': {
             'type': 'object',
             'properties': {},
         },
+        'annotations': {
+            'readOnlyHint': True,
+            'idempotentHint': True,
+        },
+    },
+]
+
+_RESOURCES: list[dict[str, Any]] = [
+    {
+        'uri': 'sieve://stats/session',
+        'name': 'Session Statistics',
+        'description': 'Cumulative compression statistics for the current session.',
+        'mimeType': 'application/json',
+    },
+    {
+        'uri': 'sieve://tools/list',
+        'name': 'Available Tools',
+        'description': 'List of all available tools and their schemas.',
+        'mimeType': 'application/json',
     },
 ]
 
@@ -114,13 +156,22 @@ def _handle_compress(params: dict[str, Any]) -> dict[str, Any]:
     sieve = LogSieve(forced_framework=forced)
     compressed = sieve.sieve(output)
     stats = dict(sieve.stats)
+    global _session_stats
+    _session_stats['total_compress_calls'] += 1
+    _session_stats['total_bytes_in'] += int(stats.get('bytes_in', 0) or 0)
+    _session_stats['total_bytes_out'] += int(stats.get('bytes_out', 0) or 0)
+    cache_key = str(hash(output))
+    _session_cache[cache_key] = compressed
     return {
         'compressed': compressed,
         'stats': {
             'bytes_in': stats.get('bytes_in', 0),
             'bytes_out': stats.get('bytes_out', 0),
+            'lines_in': stats.get('lines_in', 0),
+            'lines_out': stats.get('lines_out', 0),
             'framework': stats.get('framework') or 'auto-detected',
         },
+        'cache_key': cache_key,
     }
 
 
@@ -146,11 +197,53 @@ def _handle_diff_impact(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def _handle_stats(params: dict[str, Any]) -> dict[str, Any]:
+    global _session_stats
+    calls = _session_stats['total_compress_calls']
+    b_in = _session_stats['total_bytes_in']
+    b_out = _session_stats['total_bytes_out']
+    reduction = 0.0
+    if b_in > 0:
+        reduction = (1.0 - b_out / b_in) * 100.0
     return {
-        'message': (
-            'Statistics are available per-call in the compress response. '
-            'Persistent session stats require --cache (coming in v2.1).'
-        ),
+        'total_compress_calls': calls,
+        'total_bytes_in': b_in,
+        'total_bytes_out': b_out,
+        'total_reduction_percent': round(reduction, 1),
+        'cache_entries': len(_session_cache),
+    }
+
+
+def _handle_resources_list() -> list[dict[str, Any]]:
+    return _RESOURCES
+
+
+def _handle_resources_read(uri: str) -> dict[str, Any]:
+    global _session_stats, _session_cache
+    if uri == 'sieve://stats/session':
+        return {
+            'uri': uri,
+            'mimeType': 'application/json',
+            'text': json.dumps(_handle_stats({}), indent=2),
+        }
+    if uri == 'sieve://tools/list':
+        return {
+            'uri': uri,
+            'mimeType': 'application/json',
+            'text': json.dumps(_TOOLS, indent=2),
+        }
+    if uri.startswith('sieve://cache/'):
+        key = uri[len('sieve://cache/'):]
+        val = _session_cache.get(key)
+        if val is not None:
+            return {
+                'uri': uri,
+                'mimeType': 'text/plain',
+                'text': val,
+            }
+    return {
+        'uri': uri,
+        'text': f'Resource not found: {uri}',
+        'isError': True,
     }
 
 
@@ -204,10 +297,11 @@ def _handle_message(msg: dict[str, Any]) -> list[dict[str, Any]]:
             'protocolVersion': '2024-11-05',
             'capabilities': {
                 'tools': {},
+                'resources': {},
             },
             'serverInfo': {
                 'name': 'claude-sieve',
-                'version': '2.0.0',
+                'version': __version__,
             },
         })]
 
@@ -216,6 +310,20 @@ def _handle_message(msg: dict[str, Any]) -> list[dict[str, Any]]:
 
     if method == 'notifications/cancelled':
         return []
+
+    # --- resources ----------------------------------------------------
+    if method == 'resources/list':
+        return [_make_response(req_id, {'resources': _RESOURCES})]
+
+    if method == 'resources/read':
+        uri = params.get('uri', '')
+        if isinstance(uri, str) and uri:
+            result = _handle_resources_read(uri)
+            return [_make_response(req_id, result)]
+        return [_make_response(
+            req_id,
+            error=_make_error(-32602, 'Missing or invalid uri parameter'),
+        )]
 
     # --- tools --------------------------------------------------------
     if method == 'tools/list':

@@ -15,16 +15,17 @@ def read_file(filename: str) -> str:
 
 setup(
     name="claude-sieve",
-    version="2.0.0",
+    version="3.0.0",
     description="AST-aware test output compressor for LLM agents — "
                 "mitigates token inflation and context-window degradation.",
     long_description=read_file("README.md"),
     long_description_content_type="text/markdown",
     author="Claude-Sieve Contributors",
-    url="https://github.com/anthropic/claude-sieve",
+    url="https://github.com/darkavenger756/claude-sieve",
     license="MIT",
     packages=find_packages(exclude=["tests", "tests.*"]),
     include_package_data=True,
+    package_data={"claude_sieve": ["py.typed"]},
     python_requires=">=3.10",
     install_requires=[],
     extras_require={
