@@ -279,11 +279,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     # ---- 0. special subcommands: bench / mcp server -------------------
     if args.command and args.command[0] == 'bench':
         from .bench import run_bench, print_bench
-        fw = args.command[1] if len(args.command) > 1 and args.command[1] in ('pytest', 'jest', 'mocha', 'go', 'unittest') else None
-        extra = args.command[2:] if len(args.command) > 2 else []
+        fw = None
         iterations = 3
-        if extra and extra[0].lstrip('-').isdigit():
-            iterations = int(extra[0].lstrip('-'))
+        rest = args.command[1:]
+        for token in rest:
+            if token in ('pytest', 'jest', 'mocha', 'go', 'unittest'):
+                fw = token
+            elif token.lstrip('-').isdigit():
+                iterations = int(token.lstrip('-'))
         results = run_bench(framework=fw, iterations=iterations)
         print_bench(results)
         return 0

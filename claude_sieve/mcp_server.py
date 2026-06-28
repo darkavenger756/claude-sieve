@@ -13,6 +13,7 @@ stdout.  Compatible with Claude Code, Cursor, Windsurf, Cline, and any
 other MCP-compatible client.
 """
 
+import hashlib
 import json
 import sys
 from typing import Any, Callable
@@ -160,7 +161,7 @@ def _handle_compress(params: dict[str, Any]) -> dict[str, Any]:
     _session_stats['total_compress_calls'] += 1
     _session_stats['total_bytes_in'] += int(stats.get('bytes_in', 0) or 0)
     _session_stats['total_bytes_out'] += int(stats.get('bytes_out', 0) or 0)
-    cache_key = str(hash(output))
+    cache_key = hashlib.sha256(output.encode('utf-8')).hexdigest()
     _session_cache[cache_key] = compressed
     return {
         'compressed': compressed,

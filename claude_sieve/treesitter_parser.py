@@ -10,7 +10,7 @@ from .ast_parser import ASTAnalyzer
 
 _TS_AVAILABLE = False
 try:
-    import tree_sitter  # noqa: F401
+    import tree_sitter  # type: ignore[import-not-found]  # noqa: F401
     _TS_AVAILABLE = True
 except ImportError:
     pass
@@ -26,14 +26,14 @@ class DeepASTAnalyzer(ASTAnalyzer):
 
     def _init_language(self) -> None:
         try:
-            from tree_sitter import Language, Parser
+            from tree_sitter import Language, Parser  # type: ignore[import-not-found]
             self._parser = Parser()
             try:
                 PYTHON_LANGUAGE = Language('build/my-languages.so', 'python')
                 self._parser.set_language(PYTHON_LANGUAGE)
             except Exception:
                 try:
-                    import tree_sitter_python as tspython
+                    import tree_sitter_python as tspython  # type: ignore[import-not-found]
                     self._parser.set_language(tspython.language())
                 except Exception:
                     self._ts_available = False

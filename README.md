@@ -173,6 +173,8 @@ optional arguments:
 
 Subcommands:
   mcp                   Start MCP server for LLM agent integration.
+  bench [framework] [iterations]
+                        Run built-in compression benchmarks.
 ```
 
 ### MCP Server Mode
@@ -304,7 +306,7 @@ jobs:
       - run: pip install claude-sieve
       - run: clavesieve pytest tests/ 2>&1 || true
       - if: failure()
-        uses: darkavenger756/claude-sieve-action@v3
+        uses: darkavenger756/claude-sieve@v3
 ```
 
 The action wraps the CLI and posts a Markdown summary on the PR with the
